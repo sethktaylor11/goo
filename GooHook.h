@@ -63,4 +63,12 @@ private:
 
     void addParticle(double x, double y);
     void addSaw(double x, double y);
+
+    void buildConfig(Eigen::VectorXd &q, Eigen::VectorXd &q_dot);
+    void storeConfig(Eigen::VectorXd q, Eigen::VectorXd q_dot);
+
+    void computeForces(Eigen::VectorXd q, Eigen::SparseMatrix<double> M, Eigen::RowVectorXd &F, Eigen::RowVectorXd &dF);
+
+    void computeMassMatrix(Eigen::SparseMatrix<double> &M);
+    void computeMassMatrixInverse(Eigen::SparseMatrix<double> &M_inv);
 };

@@ -245,6 +245,25 @@ void GooHook::tick()
 bool GooHook::simulateOneStep()
 {
     // TODO: implement time integration
+    VectorXd q;
+    VectorXd q_dot;
+    buildConfig(q, q_dot);
+
+    SparseMatrix<double> M;
+    computeMassMatrix(M);
+
+    SparseMatrix<double> M_inv;
+    computeMassMatrixInverse(M_inv);
+
+    RowVectorXd F;
+    RowVectorXd dF;
+    computeForces(q, M, F, dF);
+
+    VectorXd q_1 = q + params_.timeStep * q_dot;
+    VectorXd q_dot_1 = q_dot + params_.timeStep * M_inv * F.transpose();
+
+    storeConfig(q_1, q_dot_1);
+
     time_ += params_.timeStep;
     return false;
 }
@@ -260,9 +279,72 @@ void GooHook::addParticle(double x, double y)
     particles_.push_back(Particle(newpos, mass, params_.particleFixed, false));
 
     // TODO connect particles with springs
+    for (int i = 0; i < particles_.size()-1; i++) {
+        Particle p = particles_[i];
+	double restlen = (newpos - p.pos).norm();
+        if (restlen <= params_.maxSpringDist) {
+            connectors_.push_back(new Spring(i,particles_.size()-1,0,params_.springStiffness,restlen,true));
+	}
+    }
 }
 
 void GooHook::addSaw(double x, double y)
 {
     saws_.push_back(Saw(Vector2d(x,y), params_.sawRadius));
+}
+
+void GooHook::buildConfig(VectorXd &q, VectorXd &q_dot)
+{
+    q.resize(particles_.size()*2);
+    q_dot.resize(particles_.size()*2);
+    for (int i = 0; i < particles_.size(); i++) {
+        q[2*i] = particles_[i].pos[0];
+        q[2*i+1] = particles_[i].pos[1];
+        q_dot[2*i] = particles_[i].vel[0];
+        q_dot[2*i+1] = particles_[i].vel[1];
+    }
+}
+
+void GooHook::storeConfig(VectorXd q, VectorXd q_dot)
+{
+    for (int i = 0; i < particles_.size(); i++) {
+        particles_[i].pos = Vector2d (q[2*i],q[2*i+1]);
+        particles_[i].vel = Vector2d (q_dot[2*i],q_dot[2*i+1]);
+    }
+}
+
+void GooHook::computeForces(VectorXd q, SparseMatrix<double> M, RowVectorXd &F, RowVectorXd &dF)
+{
+    RowVectorXd S_g(q.size());
+    for (int i = 0; i < q.size(); i+=2) {
+        S_g[i] = 0;
+        S_g[i+1] = 1;
+    }
+    RowVectorXd F_g = params_.gravityG * S_g * M;
+    // Gravity does not contribute to the energy Hessiad dF
+    F = F_g;
+    dF.resize(F_g.size());
+}
+
+void GooHook::computeMassMatrix(SparseMatrix<double> &M)
+{
+    M.resize(particles_.size()*2,particles_.size()*2);
+    std::vector<Triplet<double>> mass_entries;
+    mass_entries.resize(particles_.size()*2);
+    for (int i = 0; i < particles_.size(); i++) {
+        mass_entries[2*i] = Triplet<double>(2*i,2*i,particles_[i].mass);
+        mass_entries[2*i+1] = Triplet<double>(2*i+1,2*i+1,particles_[i].mass);
+    }
+    M.setFromTriplets(mass_entries.begin(),mass_entries.end());
+}
+
+void GooHook::computeMassMatrixInverse(SparseMatrix<double> &M_inv)
+{
+    SparseMatrix<double> M;
+    computeMassMatrix(M);
+    SimplicialLLT<SparseMatrix<double>> solver;
+    solver.compute(M);
+    SparseMatrix<double> I(particles_.size()*2,particles_.size()*2);
+    I.setIdentity();
+    M_inv = solver.solve(I);
 }
