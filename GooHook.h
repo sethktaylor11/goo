@@ -64,11 +64,14 @@ private:
     void addParticle(double x, double y);
     void addSaw(double x, double y);
 
-    void buildConfig(Eigen::VectorXd &q, Eigen::VectorXd &q_dot);
+    void buildConfig(Eigen::VectorXd &q, Eigen::VectorXd &q_0, Eigen::VectorXd &q_dot);
     void storeConfig(Eigen::VectorXd q, Eigen::VectorXd q_dot);
 
-    void computeForces(Eigen::VectorXd q, Eigen::SparseMatrix<double> M, Eigen::RowVectorXd &F, Eigen::RowVectorXd &dF);
+    void computeForces(Eigen::VectorXd q, Eigen::VectorXd q_0, Eigen::SparseMatrix<double> M, Eigen::RowVectorXd &F);
+    void computedF(Eigen::VectorXd q, Eigen::SparseMatrix<double> &dF);
 
-    void computeMassMatrix(Eigen::SparseMatrix<double> &M);
-    void computeMassMatrixInverse(Eigen::SparseMatrix<double> &M_inv);
+    void computeMassMatrices(Eigen::SparseMatrix<double> &M, Eigen::SparseMatrix<double> &M_inv);
+
+    Eigen::VectorXd residualImplicit(Eigen::VectorXd q_1, Eigen::VectorXd q, Eigen::VectorXd q_dot, Eigen::SparseMatrix<double> M, Eigen::SparseMatrix<double> M_inv);
+    Eigen::VectorXd residualMidpoint(Eigen::VectorXd q_1, Eigen::VectorXd q, Eigen::VectorXd q_0, Eigen::VectorXd q_dot, Eigen::SparseMatrix<double> M, Eigen::SparseMatrix<double> M_inv);
 };

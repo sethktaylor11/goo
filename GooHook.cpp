@@ -246,21 +246,76 @@ bool GooHook::simulateOneStep()
 {
     // TODO: implement time integration
     VectorXd q;
+    VectorXd q_0;
     VectorXd q_dot;
-    buildConfig(q, q_dot);
+    buildConfig(q, q_0, q_dot);
 
     SparseMatrix<double> M;
-    computeMassMatrix(M);
-
     SparseMatrix<double> M_inv;
-    computeMassMatrixInverse(M_inv);
-
-    RowVectorXd F;
-    RowVectorXd dF;
-    computeForces(q, M, F, dF);
+    computeMassMatrices(M, M_inv);
 
     VectorXd q_1 = q + params_.timeStep * q_dot;
-    VectorXd q_dot_1 = q_dot + params_.timeStep * M_inv * F.transpose();
+    VectorXd q_dot_1;
+
+    RowVectorXd F;
+
+    switch (params_.integrator)
+    {
+        case params_.TI_EXPLICIT_EULER:
+            computeForces(q, q_0, M, F);
+
+            q_dot_1 = q_dot + params_.timeStep * M_inv * F.transpose();
+
+            break;
+	case params_.TI_VELOCITY_VERLET:
+	    computeForces(q_1, q, M, F);
+
+            q_dot_1 = q_dot + params_.timeStep * M_inv * F.transpose();
+
+            break;
+        case params_.TI_IMPLICIT_EULER:
+            for (int i = 0; i < params_.NewtonMaxIters; i++) {
+                VectorXd f = residualImplicit(q_1,q,q_dot,M,M_inv);
+                if (f.norm() < params_.NewtonTolerance)
+                    break;
+                SparseMatrix<double> I(particles_.size()*2,particles_.size()*2);
+                I.setIdentity();
+		SparseMatrix<double> dF;
+		computedF(q_1,dF);
+		SparseMatrix<double> df = I - pow(params_.timeStep,2) * M_inv * dF;
+                SimplicialLLT<SparseMatrix<double>> solver;
+                solver.compute(df);
+                VectorXd dq = solver.solve(-f);
+		q_1 += dq;
+	    }
+
+	    computeForces(q_1, q, M, F);
+
+            q_dot_1 = q_dot + params_.timeStep * M_inv * F.transpose();
+
+            break;
+	case params_.TI_IMPLICIT_MIDPOINT:
+            for (int i = 0; i < params_.NewtonMaxIters; i++) {
+                VectorXd f = residualMidpoint(q_1,q,q_0,q_dot,M,M_inv);
+                if (f.norm() < params_.NewtonTolerance)
+                    break;
+                SparseMatrix<double> I(particles_.size()*2,particles_.size()*2);
+                I.setIdentity();
+		SparseMatrix<double> dF;
+		computedF((q_1+q)/2,dF);
+		SparseMatrix<double> df = I - pow(params_.timeStep,2) * M_inv * dF;
+                SimplicialLLT<SparseMatrix<double>> solver;
+                solver.compute(df);
+                VectorXd dq = solver.solve(-f);
+		q_1 += dq;
+	    }
+
+	    computeForces((q_1+q)/2, (q+q_0)/2, M, F);
+
+            q_dot_1 = q_dot + params_.timeStep * M_inv * F.transpose();
+
+            break;
+    }
 
     storeConfig(q_1, q_dot_1);
 
@@ -293,13 +348,16 @@ void GooHook::addSaw(double x, double y)
     saws_.push_back(Saw(Vector2d(x,y), params_.sawRadius));
 }
 
-void GooHook::buildConfig(VectorXd &q, VectorXd &q_dot)
+void GooHook::buildConfig(VectorXd &q, VectorXd &q_0, VectorXd &q_dot)
 {
     q.resize(particles_.size()*2);
+    q_0.resize(particles_.size()*2);
     q_dot.resize(particles_.size()*2);
     for (int i = 0; i < particles_.size(); i++) {
         q[2*i] = particles_[i].pos[0];
         q[2*i+1] = particles_[i].pos[1];
+        q_0[2*i] = particles_[i].prevpos[0];
+        q_0[2*i+1] = particles_[i].prevpos[1];
         q_dot[2*i] = particles_[i].vel[0];
         q_dot[2*i+1] = particles_[i].vel[1];
     }
@@ -308,25 +366,96 @@ void GooHook::buildConfig(VectorXd &q, VectorXd &q_dot)
 void GooHook::storeConfig(VectorXd q, VectorXd q_dot)
 {
     for (int i = 0; i < particles_.size(); i++) {
-        particles_[i].pos = Vector2d (q[2*i],q[2*i+1]);
-        particles_[i].vel = Vector2d (q_dot[2*i],q_dot[2*i+1]);
+        particles_[i].prevpos = particles_[i].pos;
+        particles_[i].pos = Vector2d(q[2*i],q[2*i+1]);
+        particles_[i].vel = Vector2d(q_dot[2*i],q_dot[2*i+1]);
     }
 }
 
-void GooHook::computeForces(VectorXd q, SparseMatrix<double> M, RowVectorXd &F, RowVectorXd &dF)
+void GooHook::computeForces(VectorXd q, VectorXd q_0, SparseMatrix<double> M, RowVectorXd &F)
 {
-    RowVectorXd S_g(q.size());
-    for (int i = 0; i < q.size(); i+=2) {
-        S_g[i] = 0;
-        S_g[i+1] = 1;
+    F.resize(q.size());
+    F.setZero();
+    if (params_.gravityEnabled) {
+        RowVectorXd S_g(q.size());
+        for (int i = 0; i < q.size(); i+=2) {
+            S_g[i] = 0;
+            S_g[i+1] = 1;
+        }
+        F += params_.gravityG * S_g * M;
     }
-    RowVectorXd F_g = params_.gravityG * S_g * M;
-    // Gravity does not contribute to the energy Hessiad dF
-    F = F_g;
-    dF.resize(F_g.size());
+    if (params_.springsEnabled) {
+        for (int i = 0; i < connectors_.size(); i++) {
+            Spring* s = (Spring *)connectors_[i];
+
+            MatrixXd S(2,q.size());
+	    S.setZero();
+	    S(0,2*s->p1) = -1;
+	    S(1,2*s->p1+1) = -1;
+	    S(0,2*s->p2) = 1;
+	    S(1,2*s->p2+1) = 1;
+
+	    Vector2d vec = S * q;
+
+            F += -s->stiffness/s->restlen*(vec.norm()-s->restlen)*vec.transpose()/vec.norm()*S;
+        }
+    }
+    if (params_.dampingEnabled) {
+        for (int i = 0; i < connectors_.size(); i++) {
+            Spring* s = (Spring *)connectors_[i];
+
+            MatrixXd S(2,q.size());
+	    S.setZero();
+	    S(0,2*s->p1) = -1;
+	    S(1,2*s->p1+1) = -1;
+	    S(0,2*s->p2) = 1;
+	    S(1,2*s->p2+1) = 1;
+
+	    Vector2d vec = - (S * (q - q_0)) / params_.timeStep;
+
+            F += params_.dampingStiffness * vec.transpose() * S;
+        }
+    }
+    for (int i = 0; i < particles_.size(); i++) {
+        if (particles_[i].fixed) {
+             F[2*i] = 0;
+	     F[2*i+1] = 0;
+	}
+    }
 }
 
-void GooHook::computeMassMatrix(SparseMatrix<double> &M)
+void GooHook::computedF(VectorXd q, SparseMatrix<double> &dF)
+{
+    dF.resize(q.size(),q.size());
+    if (params_.springsEnabled) {
+        SparseMatrix<double> dummy(q.size(),q.size());
+        std::vector<Triplet<double>> dF_entries;
+        dF_entries.resize(connectors_.size()*2);
+        for (int i = 0; i < connectors_.size(); i++) {
+            Spring* s = (Spring *)connectors_[i];
+
+            dF_entries[2*i] = Triplet<double>(s->p1,s->p2,-s->stiffness);
+            dF_entries[2*i+1] = Triplet<double>(s->p2,s->p1,-s->stiffness);
+        }
+        dummy.setFromTriplets(dF_entries.begin(),dF_entries.end());
+	dF += dummy;
+    }
+    if (params_.dampingEnabled) {
+        SparseMatrix<double> dummy(q.size(),q.size());
+        std::vector<Triplet<double>> dF_entries;
+        dF_entries.resize(connectors_.size()*2);
+        for (int i = 0; i < connectors_.size(); i++) {
+            Spring* s = (Spring *)connectors_[i];
+
+            dF_entries[2*i] = Triplet<double>(s->p1,s->p2,-params_.dampingStiffness/params_.timeStep);
+            dF_entries[2*i+1] = Triplet<double>(s->p2,s->p1,-params_.dampingStiffness/params_.timeStep);
+        }
+        dummy.setFromTriplets(dF_entries.begin(),dF_entries.end());
+	dF += dummy;
+    }
+}
+
+void GooHook::computeMassMatrices(SparseMatrix<double> &M, SparseMatrix<double> &M_inv)
 {
     M.resize(particles_.size()*2,particles_.size()*2);
     std::vector<Triplet<double>> mass_entries;
@@ -336,15 +465,23 @@ void GooHook::computeMassMatrix(SparseMatrix<double> &M)
         mass_entries[2*i+1] = Triplet<double>(2*i+1,2*i+1,particles_[i].mass);
     }
     M.setFromTriplets(mass_entries.begin(),mass_entries.end());
-}
-
-void GooHook::computeMassMatrixInverse(SparseMatrix<double> &M_inv)
-{
-    SparseMatrix<double> M;
-    computeMassMatrix(M);
     SimplicialLLT<SparseMatrix<double>> solver;
     solver.compute(M);
     SparseMatrix<double> I(particles_.size()*2,particles_.size()*2);
     I.setIdentity();
     M_inv = solver.solve(I);
+}
+
+VectorXd GooHook::residualImplicit(VectorXd q_1, VectorXd q, VectorXd q_dot, SparseMatrix<double> M, SparseMatrix<double> M_inv)
+{
+    RowVectorXd F;
+    computeForces(q_1, q, M, F);
+    return q_1 - q - params_.timeStep * q_dot - pow(params_.timeStep,2) * M_inv * F.transpose();
+}
+
+VectorXd GooHook::residualMidpoint(VectorXd q_1, VectorXd q, VectorXd q_0, VectorXd q_dot, SparseMatrix<double> M, SparseMatrix<double> M_inv)
+{
+    RowVectorXd F;
+    computeForces((q_1+q)/2, (q+q_0)/2, M, F);
+    return q_1 - q - params_.timeStep * q_dot - pow(params_.timeStep,2) / 2 * M_inv * F.transpose();
 }
